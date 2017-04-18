@@ -1,54 +1,75 @@
 """
-Custom Authenticator to use Okta OAuth with JupyterHub
+Okta Authenticator to use generic OAuth2 with JupyterHub
 
-Derived from everyone else's authenticator (@frankhsu)
+Derived from GenericOAuthenticator (@frankhsu)
 """
 
-
+import base64
 import json
 import os
 
-from tornado.auth import OAuth2Mixin
-from tornado import gen, web
-
-from tornado.httputil import url_concat
-from tornado.httpclient import HTTPRequest, AsyncHTTPClient
+from traitlets import Dict, Unicode
 
 from jupyterhub.auth import LocalAuthenticator
+from tornado import gen, web
+from tornado.auth import OAuth2Mixin
+from tornado.httpclient import AsyncHTTPClient, HTTPRequest
+from tornado.httputil import url_concat
+from tornado.log import app_log as log
 
-from traitlets import Unicode
-
-from .oauth2 import OAuthLoginHandler, OAuthenticator
-
-# Support okta.com and okta enterprise installations
-OKTA_HOST = os.environ.get('OKTA_HOST') or 'okta.com'
-
-class OktaMixin(OAuth2Mixin):
-    _OAUTH_AUTHORIZE_URL = "https://%s/oauth2/v1/authorize" % OKTA_HOST
-    _OAUTH_ACCESS_TOKEN_URL = "https://%s/login/oauth2/v1/token" % OKTA_HOST
+from .oauth2 import OAuthenticator, OAuthLoginHandler
 
 
-class OktaLoginHandler(OAuthLoginHandler, OktaMixin):
-    pass
+class OktaEnvMixin(OAuth2Mixin):
+    _OAUTH_ACCESS_TOKEN_URL = os.environ.get('OKTA_TOKEN_URL', '')
+    _OAUTH_AUTHORIZE_URL = os.environ.get('OKTA_AUTHORIZE_URL', '')
+
+
+class OktaLoginHandler(OAuthLoginHandler, OktaEnvMixin):
+    def get(self):
+        redirect_uri = self.authenticator.get_callback_url(self)
+        self.log.info('oauth redirect: %r', redirect_uri)
+        self.log.info('Getting code from authorization call')
+        self.authorize_redirect(
+            redirect_uri=redirect_uri,
+            client_id=self.authenticator.client_id,
+            response_type='code',
+            scope=['email','openid'],
+            extra_params={'state': 'requested',
+                          'nonce': 'gusto'})
+        self.log.info('Finished getting code from authorization call')
 
 
 class OktaOAuthenticator(OAuthenticator):
-
     login_service = "Okta"
-
-    # deprecated names
-    okta_client_id = Unicode(config=True, help="DEPRECATED")
-    def _okta_client_id_changed(self, name, old, new):
-        self.log.warn("okta_client_id is deprecated, use client_id")
-        self.client_id = new
-    okta_client_secret = Unicode(config=True, help="DEPRECATED")
-    def _okta_client_secret_changed(self, name, old, new):
-        self.log.warn("okta_client_secret is deprecated, use client_secret")
-        self.client_secret = new
-
-    client_id_env = 'OKTA_CLIENT_ID'
-    client_secret_env = 'OKTA_CLIENT_SECRET'
     login_handler = OktaLoginHandler
+    log.info('Setting OAuth env vars')
+    userdata_url = Unicode(
+        os.environ.get('OKTA_USERDATA_URL', ''),
+        config=True,
+        help="Userdata url to get user data login information"
+    )
+    username_key = Unicode(
+        os.environ.get('OKTA_USERNAME_KEY', 'email'),
+        config=True,
+        help="Userdata username key from returned json for USERDATA_URL"
+    )
+
+    authorize_url = Unicode(
+        os.environ.get('OKTA_AUTHORIZE_URL', ''),
+        config=True,
+        help="Authorize url to get token"
+    )
+    token_url = Unicode(
+        os.environ.get('OKTA_TOKEN_URL', ''),
+        config=True,
+        help="Token url to get token"
+    )
+    token_scopes = Unicode(
+        os.environ.get('OKTA_TOKEN_SCOPES', ''),
+        config=True,
+        help="Scopes to get token"
+    ).tag(config=True)
 
     @gen.coroutine
     def authenticate(self, handler, data=None):
@@ -57,52 +78,63 @@ class OktaOAuthenticator(OAuthenticator):
             raise web.HTTPError(400, "oauth callback made without a token")
         # TODO: Configure the curl_httpclient for tornado
         http_client = AsyncHTTPClient()
-
-        # Exchange the OAuth code for a Okta Access Token
-        #
-        # See: http://developer.okta.com/docs/api/resources/oidc.html#token-request
-
         params = dict(
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-            grant_type="authorization_code",
+            grant_type='authorization_code',
             code=code,
             redirect_uri=self.get_callback_url(handler),
+            scope='email openid',
         )
 
-        url = url_concat("https://%s/login/oauth/v1/token" % OKTA_HOST,
-                         params)
+        url = url_concat(self.token_url, params)
 
-        self.log.info(url)
-        usrPass = self.client_id + ":" + self.client_secret
-        client_creds = base64.b64encode(usrPass)
-        bb_header = {"Content-Type":
-                     "application/x-www-form-urlencoded;charset=utf-8",
-                     "Authorization": "Basic {}".format(client_creds)}
+        b64key = base64.b64encode(
+            bytes(
+                "{}:{}".format(self.client_id, self.client_secret),
+                "utf8"
+            )
+        )
+
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "JupyterHub",
+            "Authorization": "Basic " + "{}".format(b64key.decode("utf8"))
+        }
+
+        log.info('Getting access token from token call with authorization_code')
+        log.info('URL: ' + url)
+        log.info('HEADERS: ' + headers)
         req = HTTPRequest(url,
-                          method="POST",
-                          body=urllib.parse.urlencode(params).encode('utf-8'),
-                          headers=bb_header
+                          method='POST',
+                          headers=headers,
+                          body=''  # Body is required for a POST.
                           )
 
         resp = yield http_client.fetch(req)
+
         resp_json = json.loads(resp.body.decode('utf8', 'replace'))
 
         access_token = resp_json['access_token']
 
         # Determine who the logged in user is
-        headers={"Accept": "application/json",
-                 "User-Agent": "JupyterHub",
-                 "Authorization": "Bearer {}".format(access_token)
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "JupyterHub",
+            "Authorization": "{} {}".format('Bearer', access_token)
         }
-        req = HTTPRequest("https://%s/oauth2/v1/userinfo" % OKTA_HOST,
-                          method="POST",
-                          headers=headers
+        url = self.userdata_url
+
+        log.info('Getting verifying user with access_token')
+        log.info('URL: ' + url)
+        log.info('HEADERS: ' + headers)
+        req = HTTPRequest(url,
+                          method='GET',
+                          headers=headers,
                           )
         resp = yield http_client.fetch(req)
         resp_json = json.loads(resp.body.decode('utf8', 'replace'))
 
-        return resp_json["email"]
+        if resp_json.get(self.username_key):
+            return resp_json[self.username_key]
 
 
 class LocalOktaOAuthenticator(LocalAuthenticator, OktaOAuthenticator):
