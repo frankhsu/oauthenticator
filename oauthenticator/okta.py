@@ -120,7 +120,7 @@ class OktaOAuthenticator(OAuthenticator):
             "User-Agent": "JupyterHub",
             "Authorization": "{} {}".format('Bearer', access_token)
         }
-        url = self.userdata_url
+        url = url_concat(self.userdata_url, params)
 
         log.info('Getting verifying user with access_token')
         log.info('URL: ' + url)
