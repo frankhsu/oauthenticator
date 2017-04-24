@@ -102,7 +102,6 @@ class OktaOAuthenticator(OAuthenticator):
 
         log.info('Getting access token from token call with authorization_code')
         log.info('URL: ' + url)
-        log.info('HEADERS: ' + headers)
         req = HTTPRequest(url,
                           method='POST',
                           headers=headers,
@@ -125,7 +124,6 @@ class OktaOAuthenticator(OAuthenticator):
 
         log.info('Getting verifying user with access_token')
         log.info('URL: ' + url)
-        log.info('HEADERS: ' + headers)
         req = HTTPRequest(url,
                           method='GET',
                           headers=headers,
