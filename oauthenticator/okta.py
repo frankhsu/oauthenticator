@@ -134,7 +134,7 @@ class OktaOAuthenticator(OAuthenticator):
         resp_json = json.loads(resp.body.decode('utf8', 'replace'))
 
         if resp_json.get(self.username_key):
-            return resp_json[self.username_key]
+            return resp_json[self.username_key].split('@')[0]
 
 
 class LocalOktaOAuthenticator(LocalAuthenticator, OktaOAuthenticator):
